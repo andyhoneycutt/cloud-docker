@@ -1,0 +1,26 @@
+[
+    {
+        "ParameterKey": "Port",
+        "ParameterValue": "25565"
+    },
+    {
+        "ParameterKey": "ImageUri",
+        "ParameterValue": "itzg/minecraft-server"
+    },
+    {
+        "ParameterKey": "EnvironmentFilePath",
+        "ParameterValue": "cloud-game-servers-envs/minecraft.env"
+    },
+    {
+        "ParameterKey": "InstanceType",
+        "ParameterValue": "t2.medium"
+    },
+    {
+        "ParameterKey": "Cpu",
+        "ParameterValue": "1024"
+    },
+    {
+        "ParameterKey": "Memory",
+        "ParameterValue": "2000"
+    }
+]

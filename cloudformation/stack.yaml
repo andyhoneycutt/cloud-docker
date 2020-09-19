@@ -1,0 +1,531 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: This template deploys a VPC, with a pair of public and private subnets spread
+  across two Availability Zones. It deploys an internet gateway, with a default
+  route on the public subnets. It deploys a pair of NAT gateways (one in each AZ),
+  and default routes for them in the private subnets. Based on
+  "https://docs.aws.amazon.com/codebuild/latest/userguide/cloudformation-vpc-template.html"
+
+Parameters:
+  Port:
+    Type: Number
+    Description: Service port number
+  Cpu:
+    Type: Number
+    Description: Cpu footprint of container; 1024 = 1 CPU
+    Default: 1024
+  Memory:
+    Type: Number
+    Description: Memory footprint of container in megabytes
+    Default: 2048
+  ImageUri:
+    Type: String
+    Description: The uri for the container service image to run
+  EnvironmentFilePath:
+    Type: String
+    Description: The s3 bucket path location for the container environment file
+    Default: ''
+  InstanceType:
+    Type: String
+    Default: t2.small
+    Description: Class of EC2 instance used to host containers. Choose t2 for
+      testing, m5 for general purpose, c5 for CPU intensive services, and r5
+      for memory intensive services
+    AllowedValues: [
+        t2.micro, t2.small, t2.medium, t2.large, t2.xlarge, t2.2xlarge,
+        m5.large, m5.xlarge, m5.2large, m5.4xlarge, m5.12xlarge, m5.24large,
+        c5.large, c5.xlarge, c5.2xlarge, c5.4xlarge, c5.9xlarge, c5.18xlarge,
+        r5.large, r5.xlarge, r5.2xlarge, r5.4xlarge, r5.12xlarge, r5.24xlarge
+    ]
+    ConstraintDescription: Please choose a valid instance type.
+  DesiredCapacity:
+    Type: Number
+    Default: '1'
+    Description: Number of EC2 instances to launch in your ECS cluster.
+  MaxSize:
+    Type: Number
+    Default: '1'
+    Description: Maximum number of EC2 instances that can be launched in your
+      ECS cluster.
+  ContainerImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux/recommended/image_id
+    Description: The Amazon Machine Image ID used for the cluster, leave it as
+      the default value to get the latest AMI
+
+Conditions:
+  HasEnvironmentFilePath:
+    !Not [ !Equals [ !Ref EnvironmentFilePath, '' ] ]
+
+Resources:
+
+  # Network / VPC
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.1.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [ 'VPC', !Ref AWS::StackName ] ]
+        - Key: Environment
+          Value: !Ref AWS::StackName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [ 'InternetGateway', !Ref AWS::StackName ] ]
+        - Key: Environment
+          Value: !Ref AWS::StackName
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: 10.1.10.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [ 'Subnet-Public-AZ1', !Ref AWS::StackName ] ]
+        - Key: Environment
+          Value: !Ref AWS::StackName
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs  '' ]
+      CidrBlock: 10.1.11.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [ 'Subnet-Public-AZ2', !Ref AWS::StackName ] ]
+        - Key: Environment
+          Value: !Ref AWS::StackName
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs  '' ]
+      CidrBlock: 10.1.20.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [ 'Subnet-Private-AZ1', !Ref AWS::StackName ] ]
+        - Key: Environment
+          Value: !Ref AWS::StackName
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs  '' ]
+      CidrBlock: 10.1.21.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [ 'Subnet-Private-AZ2', !Ref AWS::StackName ] ]
+        - Key: Environment
+          Value: !Ref AWS::StackName
+
+  NatGatewayAttachmentA:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGatewayAttachmentB:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGatewayA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayAttachmentA.AllocationId
+      SubnetId: !Ref PublicSubnetA
+
+  NatGatewayB:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayAttachmentB.AllocationId
+      SubnetId: !Ref PublicSubnetB
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [ 'RouteTable', !Ref AWS::StackName ] ]
+        - Key: Environment
+          Value: !Ref AWS::StackName
+
+  Route:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref PublicSubnetA
+
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref PublicSubnetB
+
+  PrivateRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [ 'RouteTable-Private-A', !Ref AWS::StackName ] ]
+        - Key: Environment
+          Value: !Ref AWS::StackName
+
+  PrivateRouteA:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayA
+
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA
+      SubnetId: !Ref PrivateSubnetA
+
+  PrivateRouteTableB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [ 'RouteTable-Private-B', !Ref AWS::StackName ] ]
+        - Key: Environment
+          Value: !Ref AWS::StackName
+
+  PrivateRouteB:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableB
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayB
+
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableB
+      SubnetId: !Ref PrivateSubnetB
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join [ '-', [ !Ref AWS::StackName, 'sg' ] ]
+      GroupDescription: !Join [ ' ', [ 'Security group for', !Ref AWS::StackName ] ]
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref Port
+          ToPort: !Ref Port
+          CidrIp: 0.0.0.0/0
+
+  # Logging
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join [ '-', [ 'LogGroup', !Ref AWS::StackName ] ]
+
+  # Roles
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join [ '-', [ 'ExecutionRole', !Ref AWS::StackName ] ]
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs.amazonaws.com
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ecs-service
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:AttachNetworkInterface'
+                  - 'ec2:CreateNetworkInterface'
+                  - 'ec2:CreateNetworkInterfacePermission'
+                  - 'ec2:DeleteNetworkInterface'
+                  - 'ec2:DeleteNetworkInterfacePermission'
+                  - 'ec2:Describe*'
+                  - 'ec2:DetachNetworkInterface'
+                  - 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer'
+                  - 'elasticloadbalancing:DeregisterTargets'
+                  - 'elasticloadbalancing:Describe*'
+                  - 'elasticloadbalancing:RegisterInstancesWithLoadBalancer'
+                  - 'elasticloadbalancing:RegisterTargets'
+                Resource: '*'
+        - Fn::If:
+          - HasEnvironmentFilePath
+          - PolicyName: !Join [ '-', [ 'TaskS3GetBucket', !Ref AWS::StackName ] ]
+            PolicyDocument:
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:GetBucketLocation
+                  Resource:
+                    - !Join [ '', [ 'arn:aws:s3:::', !Select [ 0, !Split [ '/', !Ref EnvironmentFilePath ] ] ] ]
+          - !Ref AWS::NoValue
+        - Fn::If:
+            - HasEnvironmentFilePath
+            - PolicyName: !Join [ '-', [ 'TaskS3GetFileObject', !Ref AWS::StackName ] ]
+              PolicyDocument:
+                Statement:
+                  - Effect: Allow
+                    Action:
+                      - s3:GetObject
+                    Resource:
+                      - !Join [ '', [ 'arn:aws:s3:::', !Ref EnvironmentFilePath ] ]
+            - !Ref AWS::NoValue
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: ecs-service
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ecs:CreateCluster'
+                  - 'ecs:DeregisterContainerInstance'
+                  - 'ecs:DiscoverPollEndpoint'
+                  - 'ecs:Poll'
+                  - 'ecs:RegisterContainerInstance'
+                  - 'ecs:StartTelemetrySession'
+                  - 'ecs:Submit*'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'ecr:GetAuthorizationToken'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:GetDownloadUrlForLayer'
+                Resource: '*'
+
+  # Launch Configuration
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      LaunchConfigurationName: !Ref LaunchConfiguration
+      MinSize: '1'
+      MaxSize: !Ref 'MaxSize'
+      DesiredCapacity: !Ref 'DesiredCapacity'
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: 'true'
+
+  LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref ContainerImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref IamInstanceProfile
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          echo ECS_CLUSTER=${EcsCluster} >> /etc/ecs/ecs.config
+          yum install -y aws-cfn-bootstrap
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AutoScalingGroup --region ${AWS::Region}
+
+  IamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref EC2InstanceRole
+
+  # Load Balancer
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: network
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'Allows access to public ${AWS::StackName} load balancer'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Join ['-', ['TargetGroup', !Ref AWS::StackName]]
+      Port: !Ref Port
+      Protocol: TCP
+      VpcId: !Ref VPC
+
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - LoadBalancer
+      - TargetGroup
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: !Ref Port
+      Protocol: TCP
+
+  # Service Layer
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [ 'Cluster', !Ref AWS::StackName ] ]
+
+  EcsService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - TaskDefinition
+      - LoadBalancerListener
+    Properties:
+      ServiceName: !Join [ '-', [ 'Service', !Ref AWS::StackName ] ]
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCapacity
+      DeploymentConfiguration:
+        MaximumPercent: 100
+        MinimumHealthyPercent: 0
+      LoadBalancers:
+        - ContainerName: !Join ['-', ['Container', !Ref AWS::StackName]]
+          ContainerPort: !Ref Port
+          TargetGroupArn: !Ref TargetGroup
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref AWS::StackName
+      ExecutionRoleArn: !Ref ExecutionRole
+      ContainerDefinitions:
+        - Name: !Join [ '-', [ 'Container', !Ref AWS::StackName ] ]
+          EnvironmentFiles: !If
+            - HasEnvironmentFilePath
+            - - Type: s3
+                Value: !Join [ '', [ 'arn:aws:s3:::', !Ref EnvironmentFilePath ] ]
+            - - !Ref AWS::NoValue
+          Essential: True
+          Cpu: !Ref Cpu
+          Memory: !Ref Memory
+          Image: !Ref ImageUri
+          PortMappings:
+            - ContainerPort: !Ref Port
+              HostPort: !Ref Port
+              Protocol: TCP
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroup
+              awslogs-stream-prefix: ECS
+      RequiresCompatibilities:
+        - EC2
+      TaskRoleArn: !GetAtt ExecutionRole.Arn
+
+Outputs:
+  VPC:
+    Description: The stack's VPC
+    Value: !Ref VPC
+
+  PublicSubnetA:
+    Description: Public Subnet in AZ1
+    Value: !Ref PublicSubnetA
+
+  PublicSubnetB:
+    Description: Public Subnet in AZ2
+    Value: !Ref PublicSubnetB
+
+  PublicSubnets:
+    Description: A list of the VPC's public subnets
+    Value: !Join [ ",", [ !Ref PublicSubnetA, !Ref PublicSubnetB ] ]
+
+  PrivateSubnetA:
+    Description: Private Subnet in AZ1
+    Value: !Ref PrivateSubnetA
+
+  PrivateSubnetB:
+    Description: Private Subnet in AZ2
+    Value: !Ref PrivateSubnetB
+
+  PrivateSubnets:
+    Description: A list of the VPC's private subnets
+    Value: !Join [ ",", [ !Ref PrivateSubnetA, !Ref PrivateSubnetB ] ]
+
+  SecurityGroup:
+    Description: Security Group for VPC
+    Value: !Ref SecurityGroup
+
+  Listener:
+    Description: Public facing load balancer listener ARN
+    Value: !Ref LoadBalancerListener
+
+  DnsName:
+    Description: DNS name of public listener
+    Value: !Sub '${LoadBalancer.DNSName}'
